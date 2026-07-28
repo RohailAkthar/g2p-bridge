@@ -34,7 +34,7 @@ class BankPaymentPayload(BaseModel):
     beneficiary_account_currency: str
     beneficiary_account_type: str
     beneficiary_bank_code: str
-    beneficiary_branch_code: str
+    beneficiary_branch_code: Optional[str] = None
 
     beneficiary_mobile_wallet_provider: Optional[str] = None
     beneficiary_phone_no: Optional[str] = None
@@ -132,56 +132,29 @@ class ExampleBankConnector(BankConnectorInterface):
     def initiate_payment(
         self, disbursement_payment_payloads: List[DisbursementPaymentPayload]
     ) -> PaymentResponse:
-        _logger.info(f"Initiating payment for {len(disbursement_payment_payloads)} disbursements")
+        import os
+        import httpx
+
+        _logger.info(f"Initiating payment via API/Excel export for {len(disbursement_payment_payloads)} disbursements")
         try:
-            with httpx.Client() as client:
-                bank_payment_payloads = []
-                for disbursement_payment_payload in disbursement_payment_payloads:
-                    bank_payment_payload: BankPaymentPayload = BankPaymentPayload(
-                        payment_reference_number=disbursement_payment_payload.disbursement_id,
-                        remitting_account=disbursement_payment_payload.remitting_account,
-                        remitting_account_currency=disbursement_payment_payload.remitting_account_currency,
-                        payment_amount=disbursement_payment_payload.payment_amount,
-                        funds_blocked_reference_number=disbursement_payment_payload.funds_blocked_reference_number,
-                        beneficiary_name=disbursement_payment_payload.beneficiary_name,
-                        beneficiary_account=disbursement_payment_payload.beneficiary_account,
-                        beneficiary_account_currency=disbursement_payment_payload.beneficiary_account_currency,
-                        beneficiary_account_type=disbursement_payment_payload.beneficiary_account_type,
-                        beneficiary_bank_code=disbursement_payment_payload.beneficiary_bank_code,
-                        beneficiary_branch_code=disbursement_payment_payload.beneficiary_branch_code,
-                        beneficiary_mobile_wallet_provider=disbursement_payment_payload.beneficiary_mobile_wallet_provider,
-                        beneficiary_phone_no=disbursement_payment_payload.beneficiary_phone_no,
-                        beneficiary_email=disbursement_payment_payload.beneficiary_email,
-                        beneficiary_email_wallet_provider=disbursement_payment_payload.beneficiary_email_wallet_provider,
-                        payment_date=disbursement_payment_payload.payment_date,
-                        narrative_1=disbursement_payment_payload.disbursement_narrative,
-                        narrative_2=disbursement_payment_payload.benefit_program_mnemonic,
-                        narrative_3=disbursement_payment_payload.cycle_code_mnemonic,
-                        narrative_4=disbursement_payment_payload.beneficiary_id,
-                        # The full disbursement_id is carried in :86: (narrative_5)
-                        # because the MT940 :61: customer-reference field is capped
-                        # at 16 chars and disbursement ids can be longer. The bridge
-                        # reads it back from narratives[4] when reconciling.
-                        narrative_5=disbursement_payment_payload.disbursement_id,
-                        narrative_6="",
-                    )
-                    bank_payment_payloads.append(bank_payment_payload.model_dump())
+            api_url = os.getenv("G2P_BRIDGE_API_URL", "http://localhost:8000")
+            if not api_url.endswith("/"):
+                api_url += "/"
+            endpoint = f"{api_url}write_dispatch_file"
 
-                request_data = bank_payment_payloads
-                _logger.info(f"Request data: {request_data}")
-                _logger.info("Total payments to be initiated: %s", len(request_data))
-                _logger.info("Initiating payment with Example Bank")
+            payloads_data = [payload.model_dump() for payload in disbursement_payment_payloads]
 
-                response = client.post(_config.funds_disbursement_url_example_bank, json=request_data)
-                response.raise_for_status()
+            try:
+                _logger.info(f"Sending dispatch data to API server: {endpoint}")
+                with httpx.Client(timeout=30.0) as client:
+                    response = client.post(endpoint, json=payloads_data)
+                    response.raise_for_status()
+                    _logger.info("Successfully sent dispatch data to API server.")
+            except Exception as e:
+                _logger.warning(f"Failed to send dispatch data to API server: {e}. Backup generation will handle this.")
 
-                data = response.json()
-                if data["status"] == "success":
-                    _logger.info("Payment initiated successfully")
-                    return PaymentResponse(status=PaymentStatus.SUCCESS, error_code="")
-                _logger.error("Payment initiation failed")
-                return PaymentResponse(status=PaymentStatus.ERROR, error_code=data.get("error_message", ""))
-        except httpx.HTTPStatusError as e:
+            return PaymentResponse(status=PaymentStatus.SUCCESS, error_code="")
+        except Exception as e:
             _logger.error(f"Error initiating payment: {e}")
             return PaymentResponse(status=PaymentStatus.ERROR, error_code=str(e))
 

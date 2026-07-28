@@ -110,36 +110,15 @@ class DisbursementService(BaseService):
 
     async def update_envelope_control(self, disbursements, session):
         _logger.info("Updating Envelope Control")
-        max_retries = 5
-        last_exc = None
-
-        while max_retries:
-            try:
-                result = await session.execute(
-                    select(EnvelopeControl)
-                    .where(
-                        EnvelopeControl.disbursement_envelope_id
-                        == str(disbursements[0].disbursement_envelope_id)
-                    )
-                    .with_for_update(nowait=True)
-                )
-                envelope_control = result.scalars().first()
-                await asyncio.sleep(2)
-                break
-
-            except Exception as e:
-                last_exc = e
-                wait = random.randint(2, 5)
-                _logger.warning(
-                    f"Lock attempt failed updating envelope control: {e}. "
-                    f"{max_retries} retries left, sleeping {wait}s…"
-                )
-                await asyncio.sleep(wait)
-                max_retries -= 1
-
-        else:
-            _logger.error("Unable to acquire lock on EnvelopeControl after retries")
-            raise last_exc
+        result = await session.execute(
+            select(EnvelopeControl)
+            .where(
+                EnvelopeControl.disbursement_envelope_id
+                == str(disbursements[0].disbursement_envelope_id)
+            )
+            .with_for_update()
+        )
+        envelope_control = result.scalars().first()
         _logger.info(f"***Length of disbursements inside: {len(disbursements)}***")
         envelope_control.number_of_disbursements_received += len(disbursements)
         envelope_control.total_disbursement_quantity_received += sum(
@@ -497,41 +476,19 @@ class DisbursementService(BaseService):
 
     async def fetch_disbursements_from_db(self, disbursement_request, session) -> List[Disbursement]:
         _logger.info("Fetching Disbursements from DB")
-        max_retries = 5
-        last_exc = None
-
-        while max_retries:
-            try:
-                result = await session.execute(
-                    select(Disbursement)
-                    .where(
-                        Disbursement.disbursement_id.in_(
-                            [
-                                str(p.disbursement_id)
-                                for p in disbursement_request.request_body.request_payload
-                            ]
-                        )
-                    )
-                    .with_for_update(nowait=True)
+        result = await session.execute(
+            select(Disbursement)
+            .where(
+                Disbursement.disbursement_id.in_(
+                    [
+                        str(p.disbursement_id)
+                        for p in disbursement_request.request_body.request_payload
+                    ]
                 )
-                disbursements_in_db = result.scalars().all()
-                break
-
-            except OperationalError as e:
-                last_exc = e
-                wait = random.randint(8, 15)
-                _logger.warning(
-                    f"Lock attempt failed fetching disbursements: {e}. "
-                    f"{max_retries} retries left, sleeping {wait}s…"
-                )
-                await asyncio.sleep(wait)
-                max_retries -= 1
-
-        else:
-            _logger.error("Unable to acquire lock on Disbursement rows after retries")
-            raise last_exc
-
-        _logger.info("Disbursements Fetched from DB!")
+            )
+            .with_for_update()
+        )
+        disbursements_in_db = result.scalars().all()
         return disbursements_in_db
 
     async def validate_envelope_for_disbursement_cancellation(
@@ -624,3 +581,99 @@ class DisbursementService(BaseService):
 
         _logger.info("Envelope Validated for Disbursement Cancellation!")
         return True
+
+    async def write_dispatch_file(self, payloads: List[dict]):
+        import os
+        import glob
+        import openpyxl
+        from datetime import datetime
+
+        _logger.info(f"Writing bank dispatch file for {len(payloads)} payloads at server level")
+        if not payloads:
+            _logger.warning("No payloads provided to write_dispatch_file")
+            return
+
+        try:
+            folder_path = os.getenv("G2P_BRIDGE_BANK_DISPATCH_FOLDER", "PBMS LIST")
+            os.makedirs(folder_path, exist_ok=True)
+
+            # Find any existing Sponsor_Bank_Dispatch_*.xlsx files
+            pattern = os.path.join(folder_path, "Sponsor_Bank_Dispatch_*.xlsx")
+            existing_files = glob.glob(pattern)
+
+            headers = [
+                "Disbursement ID",
+                "Amount",
+                "Beneficiary Name",
+                "Nominee Name",
+                "Beneficiary Account",
+                "Account Type"
+            ]
+
+            written_ids = set()
+            workbook = None
+            worksheet = None
+
+            if existing_files:
+                # Sort to get the most recent one (though we clean up, let's be safe)
+                existing_files.sort(key=os.path.getmtime, reverse=True)
+                latest_file = existing_files[0]
+                try:
+                    _logger.info(f"Loading existing dispatch file: {latest_file}")
+                    workbook = openpyxl.load_workbook(latest_file)
+                    worksheet = workbook.active
+                    # Read existing IDs from the first column (skip header)
+                    for row in range(2, worksheet.max_row + 1):
+                        cell_value = worksheet.cell(row=row, column=1).value
+                        if cell_value:
+                            written_ids.add(str(cell_value).strip())
+                except Exception as e:
+                    _logger.error(f"Failed to read existing file: {e}")
+                    workbook = None
+
+            if workbook is None:
+                _logger.info("Creating new dispatch workbook")
+                workbook = openpyxl.Workbook()
+                worksheet = workbook.active
+                worksheet.append(headers)
+
+            appended_count = 0
+            for payload in payloads:
+                disbursement_id = payload.get("disbursement_id")
+                if not disbursement_id or disbursement_id in written_ids:
+                    continue
+                worksheet.append([
+                    disbursement_id,
+                    payload.get("payment_amount"),
+                    payload.get("beneficiary_name") or "",
+                    payload.get("nominee_name") or "",
+                    payload.get("beneficiary_account") or "",
+                    payload.get("beneficiary_account_type") or ""
+                ])
+                written_ids.add(disbursement_id)
+                appended_count += 1
+
+            if appended_count > 0 or not existing_files:
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                new_filename = f"Sponsor_Bank_Dispatch_{timestamp}.xlsx"
+                new_filepath = os.path.join(folder_path, new_filename)
+
+                workbook.save(new_filepath)
+                workbook.close()
+                _logger.info(f"Successfully generated new dispatch file at server level: {new_filepath}")
+
+                # Clean up / delete the old files so only the latest one remains
+                for old_file in existing_files:
+                    if os.path.exists(old_file) and os.path.abspath(old_file) != os.path.abspath(new_filepath):
+                        try:
+                            os.remove(old_file)
+                            _logger.info(f"Removed old dispatch file: {old_file}")
+                        except Exception as e:
+                            _logger.warning(f"Could not remove old file {old_file}: {e}")
+            else:
+                workbook.close()
+                _logger.info("No new records to append. Kept the existing file unchanged.")
+
+        except Exception as e:
+            _logger.error(f"Failed to write dispatch file: {e}")
+            raise e

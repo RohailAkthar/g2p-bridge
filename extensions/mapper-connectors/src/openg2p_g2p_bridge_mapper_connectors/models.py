@@ -19,3 +19,6 @@ class ResPartner(BaseORMModel):
     account_num = mapped_column(String, nullable=True)
     account_name = mapped_column(String, nullable=True)
     mobile_wallet = mapped_column(String, nullable=True)
+    nominee_first_name = mapped_column(String, nullable=True)
+    nominee_middle_name = mapped_column(String, nullable=True)
+    nominee_last_name = mapped_column(String, nullable=True)

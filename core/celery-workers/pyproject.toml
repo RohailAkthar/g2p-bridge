@@ -28,6 +28,8 @@ dependencies = [
   "mt-940",
   "psycopg2",
   "asyncpg",
+  "xlsxwriter",
+  "openpyxl",
 ]
 dynamic = ["version"]
 

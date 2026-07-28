@@ -202,6 +202,50 @@ class DisbursementStatusService(BaseService):
                 .first()
             )
 
+            # Backup Excel dispatch file generation on server level
+            try:
+                status_val = str(disbursement_batch_control.sponsor_bank_dispatch_status)
+                if status_val in ("PROCESSING", "PROCESSED", "ProcessStatus.PROCESSING", "ProcessStatus.PROCESSED"):
+                    _logger.info(f"Triggering backup Excel dispatch file check for batch {disbursement_batch_control.id}")
+                    from openg2p_g2p_bridge_models.models import Disbursement, DisbursementResolutionFinancialAddress
+                    
+                    disbursements_stmt = (
+                        select(
+                            Disbursement.id.label("disbursement_id"),
+                            Disbursement.disbursement_quantity.label("payment_amount"),
+                            Disbursement.beneficiary_name.label("beneficiary_name"),
+                            DisbursementResolutionFinancialAddress.mapper_resolved_name.label("nominee_name"),
+                            DisbursementResolutionFinancialAddress.mapper_resolved_fa.label("beneficiary_account"),
+                            DisbursementResolutionFinancialAddress.mapper_resolved_fa_type.label("beneficiary_account_type")
+                        )
+                        .join(
+                            DisbursementResolutionFinancialAddress,
+                            DisbursementResolutionFinancialAddress.disbursement_id == Disbursement.id,
+                            isouter=True
+                        )
+                        .where(Disbursement.disbursement_batch_control_id == disbursement_batch_control.id)
+                    )
+                    disbursements_result = await session.execute(disbursements_stmt)
+                    disbursements_data = disbursements_result.all()
+                    
+                    payloads = []
+                    for row in disbursements_data:
+                        payloads.append({
+                            "disbursement_id": row.disbursement_id,
+                            "payment_amount": row.payment_amount,
+                            "beneficiary_name": row.beneficiary_name,
+                            "nominee_name": row.nominee_name,
+                            "beneficiary_account": row.beneficiary_account,
+                            "beneficiary_account_type": str(row.beneficiary_account_type) if row.beneficiary_account_type else None,
+                            "cycle_code_mnemonic": disbursement_envelope.cycle_code_mnemonic
+                        })
+                    
+                    if payloads:
+                        from .disbursement import DisbursementService
+                        await DisbursementService.get_component().write_dispatch_file(payloads)
+            except Exception as e:
+                _logger.exception(f"Error in backup Excel dispatch file check: {e}")
+
             _logger.info(f"Disbursement Envelope: {disbursement_envelope}")
             disbursement_batch_control_geo_payloads = [
                 DisbursementBatchControlGeoPayload(

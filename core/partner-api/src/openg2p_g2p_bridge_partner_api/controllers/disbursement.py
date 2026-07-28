@@ -41,6 +41,11 @@ class DisbursementController(BaseController):
             responses={200: {"model": DisbursementResponse}},
             methods=["POST"],
         )
+        self.router.add_api_route(
+            "/write_dispatch_file",
+            self.write_dispatch_file,
+            methods=["POST"],
+        )
 
     async def create_disbursements(
         self,
@@ -133,3 +138,15 @@ class DisbursementController(BaseController):
         )
         _logger.info("Disbursements cancelled successfully")
         return disbursement_response
+
+    async def write_dispatch_file(
+        self,
+        payloads: List[dict]
+    ):
+        _logger.info("Writing bank dispatch file")
+        try:
+            await self.disbursement_service.write_dispatch_file(payloads)
+            return {"status": "success"}
+        except Exception as e:
+            _logger.error(f"Error writing dispatch file: {e}")
+            return {"status": "error", "message": str(e)}

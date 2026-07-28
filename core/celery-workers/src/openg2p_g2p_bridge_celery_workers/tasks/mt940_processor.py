@@ -14,6 +14,7 @@ from openg2p_g2p_bridge_models.models import (
     AccountStatement,
     AccountStatementLob,
     Disbursement,
+    DisbursementBatchControl,
     DisbursementBatchControlGeo,
     DisbursementErrorRecon,
     DisbursementRecon,
@@ -171,6 +172,7 @@ def mt940_processor_worker(statement_id: str):
 
             update_envelope_batch_status_reconciled(disbursement_recons_d, session)
             update_envelope_batch_status_reversed(disbursement_recons_rd, session)
+            update_batch_control_status_reconciled(disbursement_recons_d + disbursement_recons_rd, session)
 
             session.add_all(disbursement_error_recons)
 
@@ -588,3 +590,20 @@ def update_envelope_batch_status_reversed(disbursement_recons: List[Disbursement
         envelope_batch_status_for_cash.number_of_disbursements_reversed += count
         session.add(envelope_batch_status_for_cash)
         session.commit()
+
+
+def update_batch_control_status_reconciled(disbursement_recons: List[DisbursementRecon], session):
+    batch_ids = {r.disbursement_batch_control_id for r in disbursement_recons if r.disbursement_batch_control_id}
+    for batch_id in batch_ids:
+        # Check if all disbursements for this batch are reconciled
+        total_count = session.query(Disbursement).filter(Disbursement.disbursement_batch_control_id == batch_id).count()
+        reconciled_count = session.query(DisbursementRecon).filter(DisbursementRecon.disbursement_batch_control_id == batch_id).count()
+        _logger.info(f"Reconciliation status for batch {batch_id}: {reconciled_count}/{total_count} reconciled")
+        if total_count > 0 and reconciled_count >= total_count:
+            # Mark the batch as PROCESSED
+            batch_control = session.query(DisbursementBatchControl).filter(DisbursementBatchControl.id == batch_id).first()
+            if batch_control:
+                _logger.info(f"Marking batch {batch_id} sponsor_bank_dispatch_status as PROCESSED")
+                batch_control.sponsor_bank_dispatch_status = ProcessStatus.PROCESSED.value
+                session.add(batch_control)
+                session.commit()

@@ -55,11 +55,20 @@ class RegistryMapper(MapperInterface):
                             "fa_type": "MOBILE_WALLET"
                         }
 
+                    # Construct nominee name without fallback
+                    nominee_parts = [
+                        partner.nominee_first_name,
+                        partner.nominee_middle_name,
+                        partner.nominee_last_name
+                    ]
+                    nominee_full_name = " ".join([str(p).strip() for p in nominee_parts if p and str(p).strip()])
+                    resolved_name = nominee_full_name if nominee_full_name else None
+
                     if fa:
                         results.append(ResolveResult(
                             id=b_id,
                             fa=fa,
-                            name=partner.account_name or partner.name,
+                            name=resolved_name,
                             status="SUCCESS"
                         ))
                     else:

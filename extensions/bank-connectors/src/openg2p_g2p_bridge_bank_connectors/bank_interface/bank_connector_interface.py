@@ -31,6 +31,7 @@ class DisbursementPaymentPayload(BaseModel):
 
     beneficiary_id: str
     beneficiary_name: Optional[str] = None
+    nominee_name: Optional[str] = None
 
     beneficiary_account: Optional[str] = None
     beneficiary_account_currency: Optional[str] = None

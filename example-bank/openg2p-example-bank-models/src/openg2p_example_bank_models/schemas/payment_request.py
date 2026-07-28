@@ -15,7 +15,7 @@ class InitiatePaymentPayload(BaseModel):
     beneficiary_account_currency: str
     beneficiary_account_type: str
     beneficiary_bank_code: str
-    beneficiary_branch_code: str
+    beneficiary_branch_code: Optional[str] = None
 
     beneficiary_mobile_wallet_provider: Optional[str] = None
     beneficiary_phone_no: Optional[str] = None

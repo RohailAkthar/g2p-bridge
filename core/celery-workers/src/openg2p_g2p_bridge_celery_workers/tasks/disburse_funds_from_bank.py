@@ -132,7 +132,7 @@ def disburse_funds_from_bank_worker(disbursement_batch_control_id: str):
 
                 # update envelope status
                 if payment_response.status == PaymentStatus.SUCCESS:
-                    disbursement_batch_control.sponsor_bank_dispatch_status = ProcessStatus.PROCESSED.value
+                    disbursement_batch_control.sponsor_bank_dispatch_status = ProcessStatus.PROCESSING.value
                     disbursement_batch_control.sponsor_bank_dispatch_latest_error_code = None
                     disbursement_batch_control.sponsor_bank_dispatch_timestamp = datetime.now()
                     disbursement_batch_control.sponsor_bank_dispatch_attempts += 1
@@ -224,18 +224,13 @@ def construct_disbursement_payloads_for_digital_cash(
             .filter(DisbursementResolutionFinancialAddress.disbursement_id == disbursement.id)
             .first()
         )
-        beneficiary_name = "N/A"
-        if disbursement.beneficiary_name and len(disbursement.beneficiary_name) > 0:
-            beneficiary_name = disbursement.beneficiary_name
-        elif (
+        beneficiary_name = disbursement.beneficiary_name or "N/A"
+        nominee_name = ""
+        if (
             disbursement_resolution_financial_address
             and disbursement_resolution_financial_address.mapper_resolved_name
         ):
-            beneficiary_name = disbursement_resolution_financial_address.mapper_resolved_name
-        else:
-            _logger.warning(
-                f"Disbursement {disbursement.id} has no beneficiary name or resolved name, using 'N/A'"
-            )
+            nominee_name = disbursement_resolution_financial_address.mapper_resolved_name
 
         disbursement_payment_payloads.append(
             DisbursementPaymentPayload(
@@ -243,7 +238,7 @@ def construct_disbursement_payloads_for_digital_cash(
                 remitting_account=sponsor_bank_configuration.program_account_number,
                 remitting_account_currency=envelope.measurement_unit,
                 remitting_account_type=sponsor_bank_configuration.program_account_type,
-                remitting_account_branch_code=sponsor_bank_configuration.program_account_branch_code,
+                remitting_account_branch_code=None,
                 payment_amount=disbursement.disbursement_quantity,
                 compute_elements=disbursement.compute_elements,
                 funds_blocked_reference_number=envelope_batch_status_for_digital_cash.funds_blocked_reference_number,
@@ -258,14 +253,11 @@ def construct_disbursement_payloads_for_digital_cash(
                     if disbursement_resolution_financial_address
                     else None
                 ),
-                beneficiary_branch_code=(
-                    disbursement_resolution_financial_address.branch_code
-                    if disbursement_resolution_financial_address
-                    else None
-                ),
+                beneficiary_branch_code=None,
                 payment_date=str(datetime.date(datetime.now())),
                 beneficiary_id=disbursement.beneficiary_id,
                 beneficiary_name=beneficiary_name,
+                nominee_name=nominee_name,
                 beneficiary_account_type=disbursement_resolution_financial_address.mapper_resolved_fa_type,
                 beneficiary_phone_no=(
                     disbursement_resolution_financial_address.mobile_number
@@ -363,13 +355,13 @@ def construct_disbursement_payloads_for_physical_cash(
             remitting_account=sponsor_bank_configuration.program_account_number,
             remitting_account_currency=envelope.measurement_unit,
             remitting_account_type=sponsor_bank_configuration.program_account_type,
-            remitting_account_branch_code=sponsor_bank_configuration.program_account_branch_code,
+            remitting_account_branch_code=None,
             payment_amount=disbursement_batch_control_geo.total_quantity,
             funds_blocked_reference_number=envelope_batch_status_for_digital_cash.funds_blocked_reference_number,
             beneficiary_account=agency_detail_for_payment.agency_account_number,
             beneficiary_account_currency=envelope.measurement_unit,
             beneficiary_bank_code=agency_detail_for_payment.agency_account_bank_code,
-            beneficiary_branch_code=agency_detail_for_payment.agency_account_branch_code,
+            beneficiary_branch_code=None,
             payment_date=str(datetime.date(datetime.now())),
             beneficiary_id=disbursement_batch_control_geo.agency_id,
             beneficiary_name=agency_detail_for_payment.agency_name,

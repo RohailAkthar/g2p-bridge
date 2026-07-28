@@ -220,7 +220,7 @@ def test_disburse_funds_success(mock_session_maker, mock_bank_connector_factory)
 
     assert (
         mock_session_maker.disbursement_batch_status.sponsor_bank_dispatch_status
-        == ProcessStatus.PROCESSED.value
+        == ProcessStatus.PROCESSING.value
     )
     assert mock_session_maker.disbursement_batch_status.sponsor_bank_dispatch_latest_error_code is None
     assert mock_session_maker.disbursement_envelope_batch_status.number_of_disbursements_shipped == 1

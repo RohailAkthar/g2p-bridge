@@ -56,7 +56,7 @@ class InitiatePaymentRequest(BaseORMModelWithTimes):
     beneficiary_account_currency: Mapped[str] = mapped_column(String)
     beneficiary_account_type: Mapped[str] = mapped_column(String)
     beneficiary_bank_code: Mapped[str] = mapped_column(String)
-    beneficiary_branch_code: Mapped[str] = mapped_column(String)
+    beneficiary_branch_code: Mapped[str] = mapped_column(String, nullable=True)
 
     beneficiary_mobile_wallet_provider: Mapped[str] = mapped_column(
         String, nullable=True
