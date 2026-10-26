@@ -584,8 +584,8 @@ class DisbursementService(BaseService):
 
     async def write_dispatch_file(self, payloads: List[dict]):
         import os
-        import glob
-        import openpyxl
+        import re
+        import csv
         from datetime import datetime
 
         _logger.info(f"Writing bank dispatch file for {len(payloads)} payloads at server level")
@@ -597,9 +597,18 @@ class DisbursementService(BaseService):
             folder_path = os.getenv("G2P_BRIDGE_BANK_DISPATCH_FOLDER", "PBMS LIST")
             os.makedirs(folder_path, exist_ok=True)
 
-            # Find any existing Sponsor_Bank_Dispatch_*.xlsx files
-            pattern = os.path.join(folder_path, "Sponsor_Bank_Dispatch_*.xlsx")
-            existing_files = glob.glob(pattern)
+            # Determine cycle mnemonic from payloads
+            cycle_name = "DEFAULT"
+            for p in payloads:
+                c = p.get("cycle_code_mnemonic")
+                if c and str(c).strip():
+                    # Sanitize for safe filenames (alphanumeric, dash, underscore)
+                    cycle_name = re.sub(r"[^\w\-_\.]", "_", str(c).strip())
+                    break
+
+            date_str = datetime.now().strftime("%Y%m%d")
+            fixed_filename = f"Sponsor_Bank_Dispatch_{cycle_name}_{date_str}.csv"
+            fixed_filepath = os.path.join(folder_path, fixed_filename)
 
             headers = [
                 "Disbursement ID",
@@ -610,70 +619,54 @@ class DisbursementService(BaseService):
                 "Account Type"
             ]
 
+            # Fast deduplication: read existing IDs from the first column of the CSV
             written_ids = set()
-            workbook = None
-            worksheet = None
-
-            if existing_files:
-                # Sort to get the most recent one (though we clean up, let's be safe)
-                existing_files.sort(key=os.path.getmtime, reverse=True)
-                latest_file = existing_files[0]
+            file_exists = os.path.exists(fixed_filepath)
+            if file_exists:
                 try:
-                    _logger.info(f"Loading existing dispatch file: {latest_file}")
-                    workbook = openpyxl.load_workbook(latest_file)
-                    worksheet = workbook.active
-                    # Read existing IDs from the first column (skip header)
-                    for row in range(2, worksheet.max_row + 1):
-                        cell_value = worksheet.cell(row=row, column=1).value
-                        if cell_value:
-                            written_ids.add(str(cell_value).strip())
+                    with open(fixed_filepath, "r", encoding="utf-8-sig") as f:
+                        reader = csv.reader(f)
+                        next(reader, None)  # Skip header row
+                        for row in reader:
+                            if row and row[0]:
+                                written_ids.add(str(row[0]).strip())
+                    _logger.info(f"Loaded {len(written_ids)} existing record IDs from dispatch CSV: {fixed_filepath}")
                 except Exception as e:
-                    _logger.error(f"Failed to read existing file: {e}")
-                    workbook = None
+                    _logger.warning(f"Failed to read existing CSV file {fixed_filepath}: {e}")
 
-            if workbook is None:
-                _logger.info("Creating new dispatch workbook")
-                workbook = openpyxl.Workbook()
-                worksheet = workbook.active
-                worksheet.append(headers)
-
+            # Append new records to CSV using utf-8-sig (BOM ensures Excel compatibility)
             appended_count = 0
-            for payload in payloads:
-                disbursement_id = payload.get("disbursement_id")
-                if not disbursement_id or disbursement_id in written_ids:
-                    continue
-                worksheet.append([
-                    disbursement_id,
-                    payload.get("payment_amount"),
-                    payload.get("beneficiary_name") or "",
-                    payload.get("nominee_name") or "",
-                    payload.get("beneficiary_account") or "",
-                    payload.get("beneficiary_account_type") or ""
-                ])
-                written_ids.add(disbursement_id)
-                appended_count += 1
+            with open(fixed_filepath, "a", newline="", encoding="utf-8-sig") as f:
+                writer = csv.writer(f)
+                # Write header if file is new or empty
+                if not file_exists or os.path.getsize(fixed_filepath) == 0:
+                    writer.writerow(headers)
 
-            if appended_count > 0 or not existing_files:
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                new_filename = f"Sponsor_Bank_Dispatch_{timestamp}.xlsx"
-                new_filepath = os.path.join(folder_path, new_filename)
+                for payload in payloads:
+                    disbursement_id = payload.get("disbursement_id")
+                    if not disbursement_id:
+                        continue
+                    disb_id_str = str(disbursement_id).strip()
+                    if disb_id_str in written_ids:
+                        continue
 
-                workbook.save(new_filepath)
-                workbook.close()
-                _logger.info(f"Successfully generated new dispatch file at server level: {new_filepath}")
+                    writer.writerow([
+                        disb_id_str,
+                        payload.get("payment_amount"),
+                        payload.get("beneficiary_name") or "",
+                        payload.get("nominee_name") or "",
+                        payload.get("beneficiary_account") or "",
+                        payload.get("beneficiary_account_type") or ""
+                    ])
+                    written_ids.add(disb_id_str)
+                    appended_count += 1
 
-                # Clean up / delete the old files so only the latest one remains
-                for old_file in existing_files:
-                    if os.path.exists(old_file) and os.path.abspath(old_file) != os.path.abspath(new_filepath):
-                        try:
-                            os.remove(old_file)
-                            _logger.info(f"Removed old dispatch file: {old_file}")
-                        except Exception as e:
-                            _logger.warning(f"Could not remove old file {old_file}: {e}")
-            else:
-                workbook.close()
-                _logger.info("No new records to append. Kept the existing file unchanged.")
+            _logger.info(
+                f"Successfully updated dispatch file: {fixed_filepath} "
+                f"({appended_count} new records added, {len(written_ids)} total records)"
+            )
 
         except Exception as e:
             _logger.error(f"Failed to write dispatch file: {e}")
             raise e
+

@@ -21,6 +21,7 @@ dependencies = [
   "asyncpg",
   "fastnanoid",
   "python-magic",
+  "openpyxl",
 ]
 dynamic = ["version"]
 

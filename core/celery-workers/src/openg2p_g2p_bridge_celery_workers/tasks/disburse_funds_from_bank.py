@@ -74,6 +74,27 @@ def disburse_funds_from_bank_worker(disbursement_batch_control_id: str):
             _logger.error("No EnvelopeBatchStatusForDigitalCash found")
             return
 
+        # Atomic lock check: If another worker task is already processing this envelope, skip duplicate execution!
+        try:
+            session.query(EnvelopeBatchStatusForCash).filter(
+                EnvelopeBatchStatusForCash.disbursement_envelope_id == disbursement_envelope.id
+            ).with_for_update(nowait=True).one()
+        except OperationalError:
+            _logger.info(f"Envelope {disbursement_envelope.id} is already locked by another worker task. Skipping duplicate task {disbursement_batch_control_id}.")
+            return
+
+        pending_batch_count = (
+            session.query(DisbursementBatchControl)
+            .filter(
+                DisbursementBatchControl.disbursement_envelope_id == disbursement_envelope.id,
+                DisbursementBatchControl.sponsor_bank_dispatch_status == ProcessStatus.PENDING.value,
+            )
+            .count()
+        )
+        if pending_batch_count == 0:
+            _logger.info(f"All batch controls for envelope {disbursement_envelope.id} are already processed. Skipping duplicate task {disbursement_batch_control_id}.")
+            return
+
         sponsor_bank_configuration: (
             SponsorBankConfiguration
         ) = WarehouseHelper.get_component().retrieve_sponsor_bank_configuration(
@@ -130,12 +151,20 @@ def disburse_funds_from_bank_worker(disbursement_batch_control_id: str):
                     f"Payment response for envelope {disbursement_envelope.id} on attempt {attempt}: {payment_response.status}"
                 )
 
-                # update envelope status
+                # update envelope status for all batch controls of this envelope
                 if payment_response.status == PaymentStatus.SUCCESS:
-                    disbursement_batch_control.sponsor_bank_dispatch_status = ProcessStatus.PROCESSING.value
-                    disbursement_batch_control.sponsor_bank_dispatch_latest_error_code = None
-                    disbursement_batch_control.sponsor_bank_dispatch_timestamp = datetime.now()
-                    disbursement_batch_control.sponsor_bank_dispatch_attempts += 1
+                    session.query(DisbursementBatchControl).filter(
+                        DisbursementBatchControl.disbursement_envelope_id == disbursement_envelope.id,
+                        DisbursementBatchControl.sponsor_bank_dispatch_status == ProcessStatus.PENDING.value,
+                    ).update(
+                        {
+                            DisbursementBatchControl.sponsor_bank_dispatch_status: ProcessStatus.PROCESSING.value,
+                            DisbursementBatchControl.sponsor_bank_dispatch_latest_error_code: None,
+                            DisbursementBatchControl.sponsor_bank_dispatch_timestamp: datetime.now(),
+                            DisbursementBatchControl.sponsor_bank_dispatch_attempts: DisbursementBatchControl.sponsor_bank_dispatch_attempts + 1,
+                        },
+                        synchronize_session=False,
+                    )
                     envelope_batch_status_for_cash.number_of_disbursements_shipped += len(
                         disbursement_payment_payloads
                     )
@@ -188,14 +217,14 @@ def construct_disbursement_payloads_for_digital_cash(
     envelope_batch_status_for_digital_cash,
     sponsor_bank_configuration,
 ) -> tuple[List[DisbursementPaymentPayload], int]:
-    _logger.info(f"Constructing disbursement payloads for digital cash: {disbursement_batch_control_id}")
+    _logger.info(f"Constructing disbursement payloads for digital cash envelope: {envelope.id}")
     disbursements = (
         session.query(Disbursement)
-        .join(
+        .outerjoin(
             DisbursementResolutionFinancialAddress,
             DisbursementResolutionFinancialAddress.disbursement_id == Disbursement.id,
         )
-        .filter(Disbursement.disbursement_batch_control_id == disbursement_batch_control_id)
+        .filter(Disbursement.disbursement_envelope_id == envelope.id)
         .distinct(Disbursement.id)
         .all()
     )
@@ -224,13 +253,46 @@ def construct_disbursement_payloads_for_digital_cash(
             .filter(DisbursementResolutionFinancialAddress.disbursement_id == disbursement.id)
             .first()
         )
-        beneficiary_name = disbursement.beneficiary_name or "N/A"
-        nominee_name = ""
-        if (
-            disbursement_resolution_financial_address
-            and disbursement_resolution_financial_address.mapper_resolved_name
-        ):
-            nominee_name = disbursement_resolution_financial_address.mapper_resolved_name
+        compute_el = disbursement.compute_elements or {}
+        resolved_name = (
+            disbursement_resolution_financial_address.mapper_resolved_name
+            if (disbursement_resolution_financial_address and disbursement_resolution_financial_address.mapper_resolved_name)
+            else ""
+        )
+
+        # Beneficiary Name Priorities:
+        # 1st Priority: mapper_resolved_name (from FA Mapper)
+        # 2nd Priority: disbursement.beneficiary_name (from Odoo Social Registry)
+        # 3rd Priority: compute_elements.get("beneficiary_name") (from Odoo Social Registry)
+        beneficiary_name = (
+            resolved_name
+            or disbursement.beneficiary_name
+            or compute_el.get("beneficiary_name")
+            or f"ID: {disbursement.beneficiary_id}"
+        )
+
+        # Nominee Name Priorities:
+        # 1st Priority: mapper_resolved_name (from FA Mapper if beneficiary_name present)
+        # 2nd Priority: disbursement.nominee_name or compute_elements.get("nominee_name") (from Odoo Social Registry)
+        disbursement_nominee = getattr(disbursement, "nominee_name", None) or compute_el.get("nominee_name") or ""
+        nominee_name = (
+            (resolved_name if (disbursement.beneficiary_name or compute_el.get("beneficiary_name")) else "")
+            or disbursement_nominee
+        )
+
+        account_no = None
+        if disbursement_resolution_financial_address:
+            raw_acc = disbursement_resolution_financial_address.bank_account_number
+            if isinstance(raw_acc, str) and raw_acc.startswith("{"):
+                try:
+                    import ast
+                    parsed = ast.literal_eval(raw_acc)
+                    if isinstance(parsed, dict):
+                        account_no = str(parsed.get("account_number") or parsed.get("mobile_number") or raw_acc).strip()
+                except Exception:
+                    account_no = raw_acc
+            else:
+                account_no = raw_acc
 
         disbursement_payment_payloads.append(
             DisbursementPaymentPayload(
@@ -242,11 +304,7 @@ def construct_disbursement_payloads_for_digital_cash(
                 payment_amount=disbursement.disbursement_quantity,
                 compute_elements=disbursement.compute_elements,
                 funds_blocked_reference_number=envelope_batch_status_for_digital_cash.funds_blocked_reference_number,
-                beneficiary_account=(
-                    disbursement_resolution_financial_address.bank_account_number
-                    if disbursement_resolution_financial_address
-                    else None
-                ),
+                beneficiary_account=account_no,
                 beneficiary_account_currency=envelope.measurement_unit,
                 beneficiary_bank_code=(
                     disbursement_resolution_financial_address.bank_code
@@ -258,7 +316,11 @@ def construct_disbursement_payloads_for_digital_cash(
                 beneficiary_id=disbursement.beneficiary_id,
                 beneficiary_name=beneficiary_name,
                 nominee_name=nominee_name,
-                beneficiary_account_type=disbursement_resolution_financial_address.mapper_resolved_fa_type,
+                beneficiary_account_type=(
+                    disbursement_resolution_financial_address.mapper_resolved_fa_type
+                    if disbursement_resolution_financial_address
+                    else None
+                ),
                 beneficiary_phone_no=(
                     disbursement_resolution_financial_address.mobile_number
                     if disbursement_resolution_financial_address
